@@ -1,0 +1,38 @@
+# Policy 1 of 2: the image must carry a cosign signature made by *this
+# repository's release workflow*, and that signature must appear in the Rekor
+# transparency log.
+#
+# Why this is split from the provenance policy:
+#   Within a single ClusterImagePolicy, `authorities` are OR-ed -- satisfying
+#   any one of them admits the image. Across ClusterImagePolicies they are
+#   AND-ed. So requiring BOTH "signed" AND "has provenance" means two policies,
+#   not two authorities in one policy. Getting this backwards is the single
+#   most common way these gates end up admitting everything.
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: require-trusted-signature
+spec:
+  images:
+    - glob: "ghcr.io/twhalley/attestation-gate/**"
+
+  # Fail closed. If the policy cannot be evaluated -- Fulcio unreachable, Rekor
+  # down, malformed signature -- the image is rejected rather than admitted.
+  mode: enforce
+
+  authorities:
+    - name: github-release-workflow
+      keyless:
+        url: https://fulcio.sigstore.dev
+        identities:
+          # Trust is pinned to a *workflow identity*, not to a key and not to a
+          # person. The certificate is short-lived and was issued to this exact
+          # workflow file on this exact ref. Nothing else in the world can
+          # obtain a certificate with this subject.
+          - issuer: "https://token.actions.githubusercontent.com"
+            subject: "https://github.com/twhalley/attestation-gate/.github/workflows/build-sign-attest.yml@refs/heads/main"
+      ctlog:
+        # Requiring a transparency-log entry is what makes case 05 fail: a
+        # signature that exists but was never logged is not accepted, so an
+        # attacker who steals signing capability cannot sign quietly.
+        url: https://rekor.sigstore.dev

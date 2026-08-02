@@ -1,0 +1,10 @@
+# VEX statements do not suppress anything on their own. Grype turns them into
+# matches only where an ignore rule opts into the specific status and
+# justification -- so accepting "not_affected" is an explicit, auditable
+# decision recorded in the repository, not a side effect of passing --vex.
+#
+# Deliberately narrow: only this one justification is honoured. A statement
+# claiming, say, `component_not_present` would still show up in the report.
+ignore:
+  - vex-status: not_affected
+    vex-justification: vulnerable_code_not_in_execute_path

@@ -1,0 +1,6 @@
+.scan/
+cosign.key
+cosign.pub
+provenance.json
+*.grype.json
+*.syft.json

@@ -1,0 +1,66 @@
+# The quantitative claim, regenerated on every change rather than written once
+# into a README and left to rot.
+name: scan-diff
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, because the interesting number is not today's CVE count but how
+    # the baseline drifts upward while the hardened image does not.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both actions place their binary on PATH for subsequent steps.
+      - uses: anchore/scan-action/download-grype@v6
+      - uses: anchore/sbom-action/download-syft@v0
+
+      - name: Build and compare
+        run: ./scripts/scan-diff.sh
+
+      - name: Comment on pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('.scan/report.md', 'utf8');
+            const marker = '<!-- scan-diff -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const existing = (await github.rest.issues.listComments({
+              owner, repo, issue_number,
+            })).data.find(c => c.body.includes(marker));
+
+            const payload = `${marker}\n${body}`;
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body: payload,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body: payload,
+              });
+            }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scan-results
+          path: .scan/
+          retention-days: 14

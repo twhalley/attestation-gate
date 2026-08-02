@@ -1,0 +1,44 @@
+# Stage 3 of 3: the evidence artefact.
+#
+# Stands up a real kind cluster with sigstore policy-controller, applies the
+# policies, and attempts to run all five image variants. The job summary of
+# this workflow is the thing worth showing someone: four rejections, each with
+# the webhook's own reason, and one admission that reaches Running.
+name: gate
+
+on:
+  workflow_run:
+    workflows: [untrusted-signer]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  admission-tests:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: attestation-gate
+          wait: 120s
+
+      - name: Install policy-controller and apply policies
+        run: ./test/setup.sh
+        env:
+          CLUSTER: attestation-gate
+
+      - name: Run admission test suite
+        run: ./test/run.sh
+
+      - name: Dump policy-controller logs on failure
+        if: failure()
+        run: |
+          kubectl -n cosign-system logs -l app.kubernetes.io/name=policy-controller --tail=200 || true
+          kubectl get clusterimagepolicy -o yaml || true

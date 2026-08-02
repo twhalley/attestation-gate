@@ -1,0 +1,214 @@
+# Stage 1 of 3.
+#
+# Builds five image variants that differ ONLY in their signing/attestation
+# state, so the admission gate in stage 3 has something to accept and several
+# things to reject. Each variant carries a distinct `variant` label, which
+# gives it a distinct digest -- signatures attach to digests, so variants that
+# shared a digest would share signatures and every test would pass vacuously.
+name: build-sign-attest
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/twhalley/attestation-gate/app
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # required for keyless signing (OIDC token from Actions)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: sigstore/cosign-installer@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- variant: trusted ------------------------------------------------
+      # Signed by this workflow AND carrying SLSA provenance. The only variant
+      # that should ever be admitted.
+      - name: Build trusted variant
+        id: trusted
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          file: app/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:trusted
+          labels: variant=trusted
+          build-args: |
+            VERSION=${{ github.sha }}
+            VARIANT=trusted
+          # BuildKit's own provenance/SBOM attestations turn the pushed
+          # artefact into an image index. Disabled so the manifest stays a
+          # plain image and the only attestation present is the one we make
+          # deliberately below. See GOTCHAS.md.
+          provenance: false
+          sbom: false
+
+      # --- variant: unsigned -----------------------------------------------
+      - name: Build unsigned variant
+        id: unsigned
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          file: app/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:unsigned
+          labels: variant=unsigned
+          build-args: |
+            VERSION=${{ github.sha }}
+            VARIANT=unsigned
+          provenance: false
+          sbom: false
+
+      # --- variant: no-provenance ------------------------------------------
+      - name: Build no-provenance variant
+        id: noprov
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          file: app/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:no-provenance
+          labels: variant=no-provenance
+          build-args: |
+            VERSION=${{ github.sha }}
+            VARIANT=no-provenance
+          provenance: false
+          sbom: false
+
+      # --- variant: keysigned ----------------------------------------------
+      - name: Build keysigned variant
+        id: keysigned
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          file: app/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:keysigned
+          labels: variant=keysigned
+          build-args: |
+            VERSION=${{ github.sha }}
+            VARIANT=keysigned
+          provenance: false
+          sbom: false
+
+      # --- the "before" artefact -------------------------------------------
+      # Published so the scan-diff numbers are reproducible by anyone, and so
+      # the VEX demo has a registry digest to pin a statement to. Deliberately
+      # unsigned: it is the thing being migrated away from, and the gate
+      # rejects it like any other unsigned image.
+      - name: Build and push baseline variant
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: baseline/Dockerfile
+          push: true
+          tags: ghcr.io/twhalley/attestation-gate/baseline:latest
+          build-args: |
+            VERSION=${{ github.sha }}
+            VARIANT=baseline
+          provenance: false
+          sbom: false
+
+      # ---------------------------------------------------------------------
+      - name: Sign trusted + no-provenance variants (keyless)
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${{ steps.trusted.outputs.digest }}"
+          cosign sign --yes "${IMAGE}@${{ steps.noprov.outputs.digest }}"
+
+      - name: Generate SLSA provenance predicate
+        run: |
+          set -euo pipefail
+          cat > provenance.json <<EOF
+          {
+            "builder": {
+              "id": "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build-sign-attest.yml@${GITHUB_REF}"
+            },
+            "buildType": "https://github.com/${GITHUB_REPOSITORY}/build@v1",
+            "invocation": {
+              "configSource": {
+                "uri": "git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_REF}",
+                "digest": { "sha1": "${GITHUB_SHA}" },
+                "entryPoint": ".github/workflows/build-sign-attest.yml"
+              },
+              "environment": {
+                "github_run_id": "${GITHUB_RUN_ID}",
+                "github_run_attempt": "${GITHUB_RUN_ATTEMPT}"
+              }
+            },
+            "metadata": {
+              "buildInvocationId": "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}",
+              "completeness": {
+                "parameters": true,
+                "environment": false,
+                "materials": false
+              },
+              "reproducible": false
+            },
+            "materials": [
+              {
+                "uri": "git+https://github.com/${GITHUB_REPOSITORY}",
+                "digest": { "sha1": "${GITHUB_SHA}" }
+              }
+            ]
+          }
+          EOF
+          cat provenance.json
+
+      - name: Attest trusted variant only
+        run: |
+          set -euo pipefail
+          cosign attest --yes \
+            --type slsaprovenance \
+            --predicate provenance.json \
+            "${IMAGE}@${{ steps.trusted.outputs.digest }}"
+
+      # A signature that is valid but was never written to the transparency
+      # log. Demonstrates why the ctlog requirement in the policy matters:
+      # without it, an attacker who obtains signing capability can sign
+      # silently and leave no public record.
+      - name: Sign keysigned variant with a local key, no transparency log
+        env:
+          COSIGN_PASSWORD: ""
+        run: |
+          set -euo pipefail
+          cosign generate-key-pair
+          cosign sign --yes \
+            --key cosign.key \
+            --tlog-upload=false \
+            "${IMAGE}@${{ steps.keysigned.outputs.digest }}"
+
+      - name: Record digests for downstream stages
+        run: |
+          set -euo pipefail
+          cat > digests.env <<EOF
+          TRUSTED_DIGEST=${{ steps.trusted.outputs.digest }}
+          UNSIGNED_DIGEST=${{ steps.unsigned.outputs.digest }}
+          NOPROV_DIGEST=${{ steps.noprov.outputs.digest }}
+          KEYSIGNED_DIGEST=${{ steps.keysigned.outputs.digest }}
+          EOF
+          cat digests.env
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests
+          path: digests.env
+          retention-days: 7

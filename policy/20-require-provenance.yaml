@@ -1,0 +1,50 @@
+# Policy 2 of 2: the image must additionally carry a SLSA provenance
+# attestation, signed by the same workflow identity, whose contents say the
+# artefact was built by that workflow from this repository.
+#
+# A signature alone only proves "the release workflow saw this image". The
+# provenance is what says "...and here is how it was built, from what source".
+# The cue block below is the part that actually reads the predicate; without
+# it, any provenance document at all would satisfy the policy.
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: require-slsa-provenance
+spec:
+  images:
+    - glob: "ghcr.io/twhalley/attestation-gate/**"
+
+  mode: enforce
+
+  authorities:
+    - name: slsa-provenance
+      keyless:
+        url: https://fulcio.sigstore.dev
+        identities:
+          - issuer: "https://token.actions.githubusercontent.com"
+            subject: "https://github.com/twhalley/attestation-gate/.github/workflows/build-sign-attest.yml@refs/heads/main"
+      ctlog:
+        url: https://rekor.sigstore.dev
+      attestations:
+        - name: slsa-provenance-from-release-workflow
+          # Must be the full RFC 3986 URI. The `slsaprovenance` shorthand that
+          # cosign accepts is deprecated here and policy-controller only warns
+          # about it on apply -- see GOTCHAS.md.
+          predicateType: https://slsa.dev/provenance/v0.2
+          policy:
+            type: cue
+            # cue receives the whole in-toto Statement, so `predicateType` and
+            # `predicate` are both addressable at the top level. Every field
+            # asserted here is a field an attacker would have to forge.
+            data: |
+              predicateType: "https://slsa.dev/provenance/v0.2"
+              predicate: {
+                builder: {
+                  id: "https://github.com/twhalley/attestation-gate/.github/workflows/build-sign-attest.yml@refs/heads/main"
+                }
+                invocation: {
+                  configSource: {
+                    uri: "git+https://github.com/twhalley/attestation-gate@refs/heads/main"
+                  }
+                }
+              }

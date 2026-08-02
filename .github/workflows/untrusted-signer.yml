@@ -1,0 +1,114 @@
+# Stage 2 of 3: the adversary simulation.
+#
+# This workflow lives in the same repository, on the same branch, pushes to the
+# same registry, and gets its OIDC token from the same issuer as the release
+# workflow. It signs *and* attests its image correctly. The signature is real
+# and the transparency-log entry is real.
+#
+# It is still rejected, because Fulcio issues the certificate against THIS
+# workflow's identity (.../untrusted-signer.yml@refs/heads/main) and the policy
+# pins the subject to the release workflow. This is the case that separates a
+# gate that checks "is it signed?" from one that checks "who signed it, and were
+# they supposed to?".
+#
+# Threat modelled: a contributor or a compromised workflow with packages:write
+# and id-token:write attempting to ship an image outside the release path.
+name: untrusted-signer
+
+on:
+  workflow_run:
+    workflows: [build-sign-attest]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/twhalley/attestation-gate/app
+
+jobs:
+  sign-as-rogue:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build rogue variant
+        id: rogue
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          file: app/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:rogue
+          labels: variant=rogue
+          build-args: |
+            VERSION=${{ github.sha }}
+            VARIANT=rogue
+          provenance: false
+          sbom: false
+
+      - name: Sign and attest as the untrusted workflow identity
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${{ steps.rogue.outputs.digest }}"
+
+          # Note the builder id: this workflow honestly declares itself. Even
+          # if it lied and claimed the release workflow's id, the Fulcio
+          # certificate binding the attestation would still carry this
+          # workflow's subject, and the policy checks the certificate.
+          cat > provenance.json <<EOF
+          {
+            "builder": {
+              "id": "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/untrusted-signer.yml@${GITHUB_REF}"
+            },
+            "buildType": "https://github.com/${GITHUB_REPOSITORY}/build@v1",
+            "invocation": {
+              "configSource": {
+                "uri": "git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_REF}",
+                "digest": { "sha1": "${GITHUB_SHA}" },
+                "entryPoint": ".github/workflows/untrusted-signer.yml"
+              }
+            },
+            "metadata": {
+              "buildInvocationId": "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}",
+              "reproducible": false
+            },
+            "materials": [
+              {
+                "uri": "git+https://github.com/${GITHUB_REPOSITORY}",
+                "digest": { "sha1": "${GITHUB_SHA}" }
+              }
+            ]
+          }
+          EOF
+
+          cosign attest --yes \
+            --type slsaprovenance \
+            --predicate provenance.json \
+            "${IMAGE}@${{ steps.rogue.outputs.digest }}"
+
+      - name: Record rogue digest
+        run: |
+          echo "ROGUE_DIGEST=${{ steps.rogue.outputs.digest }}" > rogue.env
+          cat rogue.env
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rogue-digest
+          path: rogue.env
+          retention-days: 7

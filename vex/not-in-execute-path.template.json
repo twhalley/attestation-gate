@@ -1,0 +1,23 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/twhalley/attestation-gate/vex/perl-not-in-execute-path",
+  "author": "twhalley",
+  "role": "Image maintainer",
+  "timestamp": "__TIMESTAMP__",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "__CVE__"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/__IMAGE_NAME__@__DIGEST__"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The vulnerable code is in the Perl interpreter, which is present in the base image but is never invoked. The image entrypoint is a single statically linked Go binary; it does not exec any interpreter, and no shell or init script runs before it. The package is reachable only by an attacker who already has arbitrary code execution in the container, at which point this CVE is not the relevant problem."
+    }
+  ]
+}

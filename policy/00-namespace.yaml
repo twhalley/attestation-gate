@@ -1,0 +1,10 @@
+# Enforcement is opt-in per namespace. Without this label the policy-controller
+# webhook ignores the namespace entirely -- which is itself a finding worth
+# knowing about: an attacker (or a careless operator) who can create namespaces
+# can create an unenforced one. See THREATMODEL.md, "Known gaps".
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gated
+  labels:
+    policy.sigstore.dev/include: "true"
