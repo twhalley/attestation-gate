@@ -303,6 +303,33 @@ elif [ "$actual" = "reject" ] && ! grep -q 'policy.sigstore.dev' <<<"$message"; 
 
 Generalised: a negative test is only evidence if you know *why* it failed.
 
+### A NetworkPolicy that nothing enforces looks exactly like one that works
+
+NetworkPolicy is implemented by the CNI plugin. The API server accepts and
+stores the object whether or not anything will ever act on it, so
+`kubectl get networkpolicy` and `kubectl describe` both look healthy for a
+policy that is doing nothing at all. Several CNIs — including older kindnet —
+ignore them entirely.
+
+The only way to know is to test it, and the test needs a control:
+
+```bash
+kubectl run np-server --image=nginx:alpine --restart=Never
+kubectl run np-client --image=alpine:3.17 --restart=Never --command -- sleep 600
+IP=$(kubectl get pod np-server -o jsonpath='{.status.podIP}')
+
+kubectl apply -f deny-all.yaml
+kubectl exec np-client -- wget -qO- --timeout=6 "http://${IP}/"   # expect timeout
+
+kubectl delete networkpolicy deny-all
+kubectl exec np-client -- wget -qO- --timeout=6 "http://${IP}/"   # expect HTML
+```
+
+Without the second half you cannot distinguish "the policy blocked it" from
+"the server was not ready", which is how people conclude they are protected
+when they are not. Current kindnet passes this test; I expected it to fail,
+which is the entire reason for running it.
+
 ### Rejections are on Pod creation, not Deployment creation
 
 Creating a Deployment with a bad image succeeds; the Deployment is admitted and

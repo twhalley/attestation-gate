@@ -1,0 +1,52 @@
+# Default-deny egress and ingress for the gated namespace.
+#
+# The third question, after "where did this image come from?" and "what can it
+# do?": where can it talk to? A compromised workload that cannot open outbound
+# connections cannot exfiltrate, cannot fetch a second stage, and cannot reach
+# the cloud metadata endpoint.
+#
+# IMPORTANT -- NetworkPolicy is enforced by the CNI plugin, not by Kubernetes.
+# The API server accepts these objects regardless of whether anything will act
+# on them, so `kubectl get networkpolicy` proves only that you created a record.
+#
+# Verified by experiment on this cluster rather than assumed: with the policy
+# applied, a pod-to-pod request times out; with it deleted, the same request
+# returns immediately. Current kindnet does enforce NetworkPolicy -- older
+# versions did not, which is exactly why the check is worth running rather than
+# reasoning about. The method is in GOTCHAS.md; it takes two minutes and it is
+# the only way to tell an enforced policy from a decorative one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: gated
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# DNS is the exception every default-deny policy needs; without it a pod cannot
+# resolve anything and failures look like application bugs rather than policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: gated
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

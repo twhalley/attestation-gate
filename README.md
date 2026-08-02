@@ -27,9 +27,10 @@ and asserts that each one is refused.
 
 | Case | Image state | Expected | What it proves |
 |---|---|---|---|
-| `trusted` | Signed + SLSA provenance, release workflow | **admit** | The happy path works and the pod actually runs |
+| `trusted` | Signed + SLSA provenance + SBOM, release workflow | **admit** | The happy path works and the pod actually runs |
 | `unsigned` | No signature | **reject** | The gate is on |
 | `no-provenance` | Correctly signed, no attestation | **reject** | A signature alone is not enough |
+| `no-sbom` | Signed with valid provenance, no SBOM | **reject** | Each attestation is independently required |
 | `rogue` | Validly signed *and* attested by a different workflow in the same repo | **reject** | Trust is pinned to an identity, not to "is it signed?" |
 | `keysigned` | Real signature, never written to the transparency log | **reject** | Signing cannot happen off the record |
 
@@ -94,6 +95,59 @@ Python makes this clearer than a compiled language would. A static Go binary on
 hides the point. See [`vex/`](vex/) for the next question — what to do about a
 CVE that is present but not reachable.
 
+## Binary hardening, measured
+
+The obvious next question after "should I use a minimal base image?" is
+"should I compile my own hardened interpreter?". `scripts/hardening-diff.sh`
+answers it with `readelf` rather than opinion — extracting the Python
+interpreter, libpython and the OpenSSL libraries from both images and checking
+each ELF object:
+
+| Mitigation | Baseline (`python:3.12`) | Hardened (`cgr.dev/chainguard/python`) |
+|---|---:|---:|
+| PIE | 98% (139/141) | 100% (77/77) |
+| **Full RELRO** | **1% (2/141)** | **98% (76/77)** |
+| Stack canary | 65% (92/141) | 92% (71/77) |
+| FORTIFY_SOURCE | 14% (21/141) | 36% (28/77) |
+| NX stack | 100% | 100% |
+
+Full RELRO at 1% versus 98% is the striking one. The conclusion is the useful
+part: **rebuilding Python with custom `CFLAGS` would be worse, not better.** The
+hardening is already there, and a hand-rolled interpreter makes you the party
+responsible for patching it — which is the treadmill the minimal base image
+exists to get you off. Knowing when *not* to build something is the finding.
+
+(The two images do not contain identical object sets, so this is "what
+proportion of what is present is hardened", not a per-file diff. That is the
+right question for attack surface, and it is stated in the script output too.)
+
+## Building an image without a Dockerfile
+
+[`apko/python.apko.yaml`](apko/python.apko.yaml) composes a minimal Python
+image directly from Wolfi packages — no Dockerfile, no `RUN` step, no shell
+executed at any point during the build. 111 packages, 61 MB, and an SPDX SBOM
+emitted **by the builder** rather than inferred afterwards by scanning a
+finished filesystem. One of those is a record; the other is a well-educated
+guess.
+
+Two consecutive builds produced an identical layer digest, which is the
+reproducibility claim demonstrated rather than asserted. This is a scaled-down
+version of how the `cgr.dev/chainguard/*` images used here are themselves built.
+
+## Authenticating the input, not just the output
+
+`scripts/verify-base-images.sh` runs before anything is built and verifies the
+Chainguard base images against Chainguard's own keyless identity, failing the
+build if verification fails. Base images are parsed out of the Dockerfiles, so
+the check cannot drift from what is actually built.
+
+Dependencies get the same treatment from the other direction:
+`requirements.txt` is generated with `--generate-hashes` and installed with
+`pip install --require-hashes`, so a mirror serving a re-uploaded wheel fails
+the build instead of being installed and then faithfully signed. Version pins
+alone would not do that — PyPI version immutability is a policy, enforced by
+the party you would be defending against.
+
 ## Read these
 
 - **[THREATMODEL.md](THREATMODEL.md)** — what this stops, and the longer list of
@@ -109,13 +163,16 @@ kind, kubectl, helm, syft, grype and jq, and takes about three minutes. Or
 locally, with those on your `PATH`:
 
 ```bash
-./scripts/scan-diff.sh   # build both images, compare CVEs, packages, size
-./test/setup.sh          # kind cluster + policy-controller + policies
-./test/run.sh            # the five admission cases
+make verify-base   # verify the Chainguard base image signatures
+make scan          # compare CVEs, packages and size across both bases
+make hardening     # compare PIE/RELRO/canary/FORTIFY across both bases
+make apko          # build a minimal Python image declaratively, with an SBOM
+make setup         # kind cluster + policy-controller + policies
+make test          # the six admission cases
 ```
 
-`make help` lists the shortcuts. `scan-diff.sh` works standalone; `run.sh`
-needs images in GHCR, so it only passes once the pipeline has run.
+`make help` lists them all. Everything except `make test` works standalone;
+`test` needs images in GHCR, so it only passes once the pipeline has run.
 
 Images are built with **podman** — rootless and daemonless, so no build step
 holds a socket equivalent to host root. That applies in CI too: the workflows
@@ -143,6 +200,11 @@ supply-chain-relevant part.
   isolated builder. See THREATMODEL.md.
 - **One cluster, one namespace.** Multi-tenant enforcement and namespace-label
   governance are named as gaps rather than half-implemented.
+- **Base images tracked by tag, not pinned by digest.** Pinning would make
+  builds reproducible but freeze the image at one day's CVE posture until
+  something bumped it. The position taken instead: track the tag, verify the
+  signature every build, record the resolved digest in the provenance. Pinning
+  becomes the better trade once automated digest bumps exist to go with it.
 
 Infrastructure-as-code, EKS and GitOps are not repeated here — they are in
 [payments-platform-poc](https://github.com/twhalley/payments-platform-poc).

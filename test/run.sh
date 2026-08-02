@@ -14,9 +14,10 @@ ROWS=()
 
 # case name | image ref | expected decision | what it proves
 CASES=(
-  "trusted|${TRUSTED_REF:-${IMAGE}:trusted}|admit|Signed by the release workflow and carrying SLSA provenance"
+  "trusted|${TRUSTED_REF:-${IMAGE}:trusted}|admit|Signed by the release workflow, with SLSA provenance and an SBOM"
   "unsigned|${UNSIGNED_REF:-${IMAGE}:unsigned}|reject|No signature at all"
   "no-provenance|${NOPROV_REF:-${IMAGE}:no-provenance}|reject|Correctly signed, but no provenance attestation"
+  "no-sbom|${NOSBOM_REF:-${IMAGE}:no-sbom}|reject|Signed with valid provenance, but no SBOM attestation"
   "rogue|${ROGUE_REF:-${IMAGE}:rogue}|reject|Validly signed and attested by the WRONG workflow identity"
   "keysigned|${KEYSIGNED_REF:-${IMAGE}:keysigned}|reject|Real signature, never written to the Rekor transparency log"
 )

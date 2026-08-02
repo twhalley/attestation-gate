@@ -1,0 +1,47 @@
+# Policy 3 of 3: the image must carry an SPDX SBOM attestation, signed by the
+# same workflow identity.
+#
+# Separate from the provenance policy for the same reason that one is separate
+# from the signature policy: authorities inside a ClusterImagePolicy are OR-ed,
+# so anything that must be independently true needs its own policy object.
+#
+# What this buys, concretely: when the next Log4Shell lands, the question
+# "which of our running images contain the affected package?" is answerable
+# from signed attestations attached to the images themselves, rather than by
+# rebuilding everything and hoping the rebuild resembles what is deployed.
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: require-sbom
+spec:
+  images:
+    - glob: "ghcr.io/twhalley/attestation-gate/**"
+
+  mode: enforce
+
+  authorities:
+    - name: spdx-sbom
+      keyless:
+        url: https://fulcio.sigstore.dev
+        identities:
+          - issuer: "https://token.actions.githubusercontent.com"
+            subject: "https://github.com/twhalley/attestation-gate/.github/workflows/build-sign-attest.yml@refs/heads/main"
+      ctlog:
+        url: https://rekor.sigstore.dev
+      attestations:
+        - name: sbom-from-release-workflow
+          # cosign `--type spdxjson` produces this predicate type.
+          predicateType: https://spdx.dev/Document
+          policy:
+            type: cue
+            # Deliberately an existence check rather than an assertion about
+            # contents. A policy that demanded specific packages would be a
+            # policy about this application, not about whether an SBOM is
+            # present and parseable -- and it would break on the first
+            # dependency bump, which trains people to disable it.
+            data: |
+              predicateType: "https://spdx.dev/Document"
+              predicate: {
+                spdxVersion: string
+                SPDXID: string
+              }

@@ -59,9 +59,31 @@ namespaces or `hostPath`. This is a separate control answering a separate
 question, and it would still apply to an image that somehow satisfied the
 signature policy.
 
-**A build that silently changed underneath a signature.** Dependencies are
-pinned exactly in `requirements.txt`, so the artefact that was scanned and the
-artefact that was signed contain the same package versions.
+**A compromised package index.** Every dependency, including transitive ones,
+is pinned to an exact version *and* to its artefact hashes, installed with
+`pip install --require-hashes`. A mirror serving a re-uploaded wheel under an
+existing version, or a MITM on the download, fails the build rather than being
+installed and then faithfully signed. Version pins alone would not do this:
+PyPI version immutability is a policy, enforced by the party you would be
+defending against.
+
+**An unverified base image.** `scripts/verify-base-images.sh` runs before
+anything is built and verifies the Chainguard base images against Chainguard's
+own keyless signing identity, failing the job if verification fails. The base
+images are read out of the Dockerfiles rather than listed separately, so the
+check cannot drift from what is actually built. Most "we sign our images"
+pipelines authenticate their output and never authenticate their input.
+
+**Not knowing what is in a running image.** The trusted variant carries a
+signed SPDX SBOM attestation, and `policy/30-require-sbom.yaml` refuses to admit
+an image without one. When the next Log4Shell lands, "which running images
+contain the affected package?" is answerable from attestations attached to the
+images themselves.
+
+**Exfiltration from a compromised workload.** Default-deny ingress and egress
+in the `gated` namespace, with an explicit DNS exception. Enforcement was
+verified experimentally rather than assumed — see GOTCHAS.md, because a
+NetworkPolicy that nothing enforces looks identical to one that works.
 
 ---
 
@@ -90,26 +112,30 @@ does not enforce. Wiring a severity threshold into admission is a deliberate
 omission — blocking on CVE count without reachability analysis mostly produces
 alert fatigue and pressure to add exceptions.
 
-**A compromised package index.** `requirements.txt` pins versions but not
-hashes. A compromised PyPI mirror, or an account takeover that re-uploads a
-wheel under an existing version, would be installed and then faithfully signed.
-`pip install --require-hashes` pins the artefact rather than the version number
-and closes this; it is not done here, and the gap is more real than most people
-assume, because the pipeline would attest to the result without complaint.
-
-**Dependency confusion.** Nothing here pins an index or verifies package
-provenance, so a package resolved from an unexpected source would be built and
-signed like any other. This is the attack that VEX and SBOMs describe after the
-fact but do not prevent.
+**Dependency confusion.** `--require-hashes` means an unexpected package
+cannot be *installed*, because a substituted artefact will not match. What it
+does not do is stop someone adding a malicious dependency to
+`requirements.in` deliberately — at which point the hashes are regenerated to
+match it and the pipeline signs the result. Index pinning and review of
+dependency changes are the controls for that, and neither is here.
 
 **Runtime compromise.** Admission is a one-time check at Pod creation. Nothing
 here observes the workload afterwards.
 
-**A malicious base image that is correctly signed.** The policy trusts our
-workflow, and our workflow trusts `cgr.dev/chainguard/*`. That trust is
-transitive and unverified — the build does not itself verify the base image's
-signature before using it. A real deployment should, and that is the most
-obvious next control to add.
+**A malicious base image that is correctly signed by Chainguard.** The base
+image signature is now verified, which proves it came from Chainguard's release
+pipeline — not that its contents are safe. The trust is one hop shorter than it
+was, not eliminated. If Chainguard's build infrastructure were compromised, this
+check would pass.
+
+Related, and deliberate: the base images are tracked by tag, not pinned by
+digest. Pinning would make builds reproducible but would freeze the image at one
+day's CVE posture until something bumped it — reintroducing the patching
+treadmill the minimal base image exists to remove. The chosen position is to
+track the tag, verify the signature on every build, and record the resolved
+digest in the provenance, so what was built on is knowable after the fact.
+Pinning becomes the better trade the moment automated digest bumps exist to go
+with it.
 
 **Namespace-scoped enforcement bypass.** Enforcement is opt-in via the
 `policy.sigstore.dev/include: "true"` label. Anyone who can create a namespace

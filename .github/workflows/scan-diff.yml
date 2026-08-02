@@ -29,8 +29,13 @@ jobs:
       - uses: anchore/scan-action/download-grype@v6
       - uses: anchore/sbom-action/download-syft@v0
 
-      - name: Build and compare
+      - name: Build and compare CVE surface
         run: ./scripts/scan-diff.sh
+
+      # Answers "is the hardening already done for me?" with readelf rather
+      # than opinion. Cheap, and it runs on the same two images just built.
+      - name: Compare binary hardening
+        run: ./scripts/hardening-diff.sh
 
       - name: Comment on pull request
         if: github.event_name == 'pull_request'

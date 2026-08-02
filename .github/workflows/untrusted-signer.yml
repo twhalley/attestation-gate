@@ -39,6 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action/download-syft@v0
 
       - name: Ensure podman is available
         run: |
@@ -71,6 +72,15 @@ jobs:
         run: |
           set -euo pipefail
           cosign sign --yes "${IMAGE}@${{ steps.rogue.outputs.digest }}"
+
+          # A full set of attestations, so the rejection cannot be attributed
+          # to anything missing. The only thing wrong with this image is who
+          # signed it.
+          syft "${IMAGE}@${{ steps.rogue.outputs.digest }}" -o spdx-json > sbom.spdx.json
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate sbom.spdx.json \
+            "${IMAGE}@${{ steps.rogue.outputs.digest }}"
 
           # Note the builder id: this workflow honestly declares itself. Even
           # if it lied and claimed the release workflow's id, the Fulcio

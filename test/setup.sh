@@ -47,7 +47,8 @@ log "applying policies"
 kubectl apply -f "${REPO_ROOT}/policy/"
 
 log "waiting for policies to be reconciled"
-kubectl wait --for=condition=Ready clusterimagepolicy/require-trusted-signature --timeout=60s || true
-kubectl wait --for=condition=Ready clusterimagepolicy/require-slsa-provenance --timeout=60s || true
+for cip in require-trusted-signature require-slsa-provenance require-sbom; do
+  kubectl wait --for=condition=Ready "clusterimagepolicy/${cip}" --timeout=60s || true
+done
 
 log "ready. namespace 'gated' is enforcing; run test/run.sh next."

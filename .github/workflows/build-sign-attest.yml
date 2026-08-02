@@ -1,6 +1,6 @@
 # Stage 1 of 3.
 #
-# Builds five image variants that differ ONLY in their signing/attestation
+# Builds six image variants that differ ONLY in their signing/attestation
 # state, so the admission gate in stage 3 has something to accept and several
 # things to reject. Each variant carries a distinct `variant` label, which
 # gives it a distinct digest -- signatures attach to digests, so variants that
@@ -36,6 +36,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action/download-syft@v0
 
       - name: Ensure podman is available
         run: |
@@ -44,6 +45,12 @@ jobs:
             sudo apt-get update -qq && sudo apt-get install -y -qq podman
           fi
           podman version
+
+      # Authenticate the INPUT, not just the output. An unverified base image
+      # is an unverified dependency running as root inside the build. Fails the
+      # job before anything is built.
+      - name: Verify base image signatures
+        run: ./scripts/verify-base-images.sh
 
       - name: Log in to ghcr.io
         run: |
@@ -78,6 +85,7 @@ jobs:
           build_push trusted       app/Dockerfile "$PWD/app" "$IMAGE"
           build_push unsigned      app/Dockerfile "$PWD/app" "$IMAGE"
           build_push no-provenance app/Dockerfile "$PWD/app" "$IMAGE"
+          build_push no-sbom       app/Dockerfile "$PWD/app" "$IMAGE"
           build_push keysigned     app/Dockerfile "$PWD/app" "$IMAGE"
 
           # The "before" artefact. Published so the scan-diff numbers are
@@ -86,15 +94,32 @@ jobs:
           # migrated away from, and the gate rejects it like anything else.
           build_push baseline baseline/Dockerfile "$PWD" "$BASELINE_IMAGE"
 
-      - name: Sign trusted + no-provenance variants (keyless)
+      - name: Sign (keyless)
         run: |
           set -euo pipefail
           cosign sign --yes "${IMAGE}@${{ steps.build.outputs.trusted }}"
           cosign sign --yes "${IMAGE}@${{ steps.build.outputs['no-provenance'] }}"
+          cosign sign --yes "${IMAGE}@${{ steps.build.outputs['no-sbom'] }}"
 
       - name: Generate SLSA provenance predicate
         run: |
           set -euo pipefail
+
+          # Base images resolved and verified earlier in this job, recorded so
+          # the provenance says what was actually built ON, not merely what tag
+          # was requested. Tags are mutable; this is the durable reference.
+          materials=$(
+            {
+              printf '{"uri":"git+https://github.com/%s","digest":{"sha1":"%s"}}' \
+                "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+              while read -r ref; do
+                [ -z "$ref" ] && continue
+                printf ',{"uri":"%s","digest":{"sha256":"%s"}}' \
+                  "${ref%@*}" "${ref##*@sha256:}"
+              done < .base-digests
+            }
+          )
+
           cat > provenance.json <<EOF
           {
             "builder": {
@@ -121,22 +146,36 @@ jobs:
               },
               "reproducible": false
             },
-            "materials": [
-              {
-                "uri": "git+https://github.com/${GITHUB_REPOSITORY}",
-                "digest": { "sha1": "${GITHUB_SHA}" }
-              }
-            ]
+            "materials": [${materials}]
           }
           EOF
           cat provenance.json
 
-      - name: Attest trusted variant only
+      - name: Attest provenance (trusted and no-sbom)
         run: |
           set -euo pipefail
+          for digest in \
+            "${{ steps.build.outputs.trusted }}" \
+            "${{ steps.build.outputs['no-sbom'] }}"; do
+            cosign attest --yes \
+              --type slsaprovenance \
+              --predicate provenance.json \
+              "${IMAGE}@${digest}"
+          done
+
+      # The SBOM is generated from the image that was actually pushed, by
+      # digest -- not from the build context, and not from a tag that could
+      # have moved between build and scan.
+      - name: Generate and attest SPDX SBOM (trusted only)
+        run: |
+          set -euo pipefail
+          syft "${IMAGE}@${{ steps.build.outputs.trusted }}" \
+            -o spdx-json > sbom.spdx.json
+          echo "SBOM packages: $(grep -o '"SPDXID"' sbom.spdx.json | wc -l)"
+
           cosign attest --yes \
-            --type slsaprovenance \
-            --predicate provenance.json \
+            --type spdxjson \
+            --predicate sbom.spdx.json \
             "${IMAGE}@${{ steps.build.outputs.trusted }}"
 
       # A signature that is valid but was never written to the transparency
@@ -161,6 +200,7 @@ jobs:
           TRUSTED_DIGEST=${{ steps.build.outputs.trusted }}
           UNSIGNED_DIGEST=${{ steps.build.outputs.unsigned }}
           NOPROV_DIGEST=${{ steps.build.outputs['no-provenance'] }}
+          NOSBOM_DIGEST=${{ steps.build.outputs['no-sbom'] }}
           KEYSIGNED_DIGEST=${{ steps.build.outputs.keysigned }}
           BASELINE_DIGEST=${{ steps.build.outputs.baseline }}
           EOF
@@ -168,6 +208,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digests
-          path: digests.env
+          name: build-evidence
+          path: |
+            digests.env
+            provenance.json
+            sbom.spdx.json
+            .base-digests
           retention-days: 7

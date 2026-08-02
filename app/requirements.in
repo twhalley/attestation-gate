@@ -1,0 +1,9 @@
+# Direct dependencies, human-edited. The file actually installed is
+# requirements.txt, which is generated from this one and pins every transitive
+# dependency to an exact version AND a set of artefact hashes:
+#
+#   make deps
+#
+# Do not edit requirements.txt by hand.
+flask==3.1.0
+gunicorn==23.0.0

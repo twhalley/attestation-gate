@@ -15,6 +15,9 @@ ARG VARIANT=baseline
 WORKDIR /app
 
 COPY app/requirements.txt ./
+# Deliberately NOT --require-hashes, unlike app/Dockerfile. The hashes are
+# right there in the file and this build ignores them, which is the ordinary
+# case: the control exists, nobody turned it on.
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/app.py ./

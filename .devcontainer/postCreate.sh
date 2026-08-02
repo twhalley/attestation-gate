@@ -29,6 +29,15 @@ curl -fsSL --retry 3 -o "${BIN}/kind" \
   "https://kind.sigs.k8s.io/dl/${KIND_TAG}/kind-linux-amd64"
 chmod +x "${BIN}/kind"
 
+log "installing apko"
+APKO_TAG="$(curl -fsSL https://api.github.com/repos/chainguard-dev/apko/releases/latest \
+            | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+curl -fsSL --retry 3 -o /tmp/apko.tgz \
+  "https://github.com/chainguard-dev/apko/releases/download/${APKO_TAG}/apko_${APKO_TAG#v}_linux_amd64.tar.gz"
+tar xzf /tmp/apko.tgz -C /tmp
+find /tmp -maxdepth 2 -name apko -type f -exec mv {} "${BIN}/apko" \;
+chmod +x "${BIN}/apko"
+
 log "installing jq"
 curl -fsSL --retry 3 -o "${BIN}/jq" \
   https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64

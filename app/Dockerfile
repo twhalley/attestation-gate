@@ -25,8 +25,19 @@ WORKDIR /app
 
 # Dependencies first, so the layer caches independently of application code.
 COPY requirements.txt ./
+
+# --require-hashes makes pip verify the bytes of every artefact it downloads
+# against requirements.txt, and refuse to install anything that does not match.
+# Version pins alone would not: PyPI version immutability is a policy, enforced
+# by the party you are trying to defend against. Without this, a compromised
+# index could serve a re-uploaded wheel that this pipeline would install and
+# then faithfully sign -- valid provenance for a backdoored artefact.
 RUN python -m venv "$VENV" \
- && "$VENV"/bin/pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
+ && "$VENV"/bin/pip install \
+      --no-cache-dir \
+      --disable-pip-version-check \
+      --require-hashes \
+      -r requirements.txt
 
 COPY app.py ./
 

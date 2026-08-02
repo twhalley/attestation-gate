@@ -1,0 +1,49 @@
+# A minimal Python image declared rather than scripted.
+#
+# There is no Dockerfile here and no RUN step, because there is no build: apko
+# resolves a set of apk packages, lays them down, and writes an OCI image. That
+# has three consequences worth understanding, and they are the reason this file
+# exists in a repository about provenance.
+#
+#   1. No shell ever runs during the build, so there is no arbitrary code
+#      execution stage for anything to hide in.
+#   2. The contents are a resolved package list, so the SBOM is generated from
+#      what was installed rather than inferred afterwards by scanning a
+#      finished filesystem. apko emits it as a build output.
+#   3. Builds are reproducible: same package versions in, same image digest
+#      out, no timestamps or layer ordering to drift.
+#
+# This is a scaled-down version of how the Chainguard images used elsewhere in
+# this repository are themselves produced.
+#
+#   apko build apko/python.apko.yaml attestation-gate/apko-python:local apko.tar
+#
+contents:
+  repositories:
+    - https://packages.wolfi.dev/os
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+  packages:
+    - wolfi-baselayout
+    - ca-certificates-bundle
+    - python-3.13
+
+accounts:
+  groups:
+    - groupname: nonroot
+      gid: 65532
+  users:
+    - username: nonroot
+      uid: 65532
+      gid: 65532
+  run-as: 65532
+
+entrypoint:
+  command: /usr/bin/python3.13
+
+environment:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+archs:
+  - x86_64
