@@ -81,6 +81,9 @@ overrides() { # pod-name image-ref
       "runAsUser": 65532,
       "seccompProfile": { "type": "RuntimeDefault" }
     },
+    "volumes": [
+      { "name": "tmp", "emptyDir": { "medium": "Memory" } }
+    ],
     "containers": [{
       "name": "$1",
       "image": "$2",
@@ -88,7 +91,10 @@ overrides() { # pod-name image-ref
         "allowPrivilegeEscalation": false,
         "readOnlyRootFilesystem": true,
         "capabilities": { "drop": ["ALL"] }
-      }
+      },
+      "volumeMounts": [
+        { "name": "tmp", "mountPath": "/tmp" }
+      ]
     }]
   }
 }

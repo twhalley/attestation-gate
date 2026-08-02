@@ -228,11 +228,39 @@ builder stage if you care about the startup cost you just gave up.
 Related: set `PYTHONUNBUFFERED=1`, or logs sit in a buffer and vanish when the
 container is killed — which is precisely when you wanted them.
 
-### Nothing writes to the filesystem
+### Nothing writes to the filesystem — and Podman hides this from you
 
-No `/tmp` scratch space you should rely on, and a read-only root filesystem is
-the expected posture. Mount an `emptyDir` for anything that genuinely needs to
-write — including, for some libraries, `~/.cache`.
+A read-only root filesystem is the expected posture, and gunicorn needs a
+writable `/tmp` for worker heartbeat files. So this crashes in Kubernetes:
+
+```
+FileNotFoundError: [Errno 2] No usable temporary directory found in
+['/tmp', '/var/tmp', '/usr/tmp', '/app']
+```
+
+The trap is that testing it locally **passes**. `podman run --read-only`
+defaults to `--read-only-tmpfs=true` and quietly mounts a tmpfs on `/tmp` and
+`/run`. Kubernetes' `readOnlyRootFilesystem: true` gives you no such thing. The
+local test and the cluster are running materially different configurations
+while appearing to test the same property.
+
+To reproduce the Kubernetes behaviour locally:
+
+```bash
+podman run --rm --read-only --read-only-tmpfs=false IMAGE
+```
+
+The fix is an explicit in-memory volume, which is what you want anyway — it
+never touches disk:
+
+```json
+"volumes":      [{ "name": "tmp", "emptyDir": { "medium": "Memory" } }],
+"volumeMounts": [{ "name": "tmp", "mountPath": "/tmp" }]
+```
+
+Same lesson as the NetworkPolicy CNI check: the local approximation of a
+control is not the control. This one cost a green local run and a red CI run
+to find, which is the cheap ordering.
 
 ### The entrypoint differs from the image you migrated off
 
