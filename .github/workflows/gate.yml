@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   admission-tests:
@@ -33,6 +34,22 @@ jobs:
         run: ./test/setup.sh
         env:
           CLUSTER: attestation-gate
+
+      # Admission happens before any pull, so the reject cases pass without
+      # this. The admit case does not: it asserts the pod actually reaches
+      # Running, which needs the kubelet to fetch the image. Doing it with a
+      # pull secret rather than by making the package public keeps the demo
+      # self-contained and independent of repository settings.
+      - name: Give the cluster credentials to pull from GHCR
+        run: |
+          set -euo pipefail
+          kubectl -n gated create secret docker-registry ghcr \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GITHUB_TOKEN }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n gated patch serviceaccount default \
+            -p '{"imagePullSecrets":[{"name":"ghcr"}]}'
 
       - name: Run admission test suite
         run: ./test/run.sh

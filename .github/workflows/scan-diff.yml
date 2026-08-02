@@ -25,9 +25,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Both actions place their binary on PATH for subsequent steps.
-      - uses: anchore/scan-action/download-grype@v6
-      - uses: anchore/sbom-action/download-syft@v0
+      # Installed from the vendors' own install scripts rather than via the
+      # wrapper actions: download-grype does not reliably leave grype on PATH
+      # for later `run:` steps, and the failure surfaces as "missing required
+      # tool: grype" several steps later.
+      - name: Install syft and grype
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh  | sudo sh -s -- -b /usr/local/bin
+          curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sudo sh -s -- -b /usr/local/bin
+          syft --version && grype --version
 
       - name: Build and compare CVE surface
         run: ./scripts/scan-diff.sh
