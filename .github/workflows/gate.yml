@@ -15,6 +15,7 @@ on:
 permissions:
   contents: read
   packages: read
+  actions: read # to download the build stage's digest artefacts
 
 jobs:
   admission-tests:
@@ -63,6 +64,44 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n gated patch serviceaccount default \
             -p '{"imagePullSecrets":[{"name":"ghcr"}]}'
+
+      # Pin the test to the exact digests a completed build produced, rather
+      # than resolving the tags now.
+      #
+      # Tags are mutable, and a push while this job is queued starts a rebuild
+      # that moves them. Resolving `:trusted` mid-rebuild finds an image that
+      # has been pushed but not yet attested, and the suite reports a failure
+      # that says nothing about the policies -- the same class of false signal
+      # as every other bug in this file's history, arriving by a new route.
+      - name: Pin digests from the last successful build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/twhalley/attestation-gate/app
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/evidence
+
+          build_run=$(gh run list --workflow build-sign-attest.yml \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          rogue_run=$(gh run list --workflow untrusted-signer.yml \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+
+          echo "build evidence from run ${build_run}, rogue from run ${rogue_run}"
+          gh run download "$build_run" --name build-evidence --dir /tmp/evidence
+          gh run download "$rogue_run" --name rogue-digest   --dir /tmp/evidence
+
+          # shellcheck disable=SC1091
+          . /tmp/evidence/digests.env
+          . /tmp/evidence/rogue.env
+
+          {
+            echo "TRUSTED_REF=${IMAGE}@${TRUSTED_DIGEST}"
+            echo "UNSIGNED_REF=${IMAGE}@${UNSIGNED_DIGEST}"
+            echo "NOPROV_REF=${IMAGE}@${NOPROV_DIGEST}"
+            echo "NOSBOM_REF=${IMAGE}@${NOSBOM_DIGEST}"
+            echo "KEYSIGNED_REF=${IMAGE}@${KEYSIGNED_DIGEST}"
+            echo "ROGUE_REF=${IMAGE}@${ROGUE_DIGEST}"
+          } >> "$GITHUB_ENV"
 
       - name: Run admission test suite
         run: ./test/run.sh
