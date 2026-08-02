@@ -34,14 +34,16 @@ spec:
           predicateType: https://spdx.dev/Document
           policy:
             type: cue
-            # Deliberately an existence check rather than an assertion about
-            # contents. A policy that demanded specific packages would be a
-            # policy about this application, not about whether an SBOM is
-            # present and parseable -- and it would break on the first
-            # dependency bump, which trains people to disable it.
+            # Asserts the predicate type and, via the authority above, the
+            # signer. Deliberately says nothing about contents: a policy that
+            # demanded specific packages would be a policy about this
+            # application rather than about whether a trustworthy SBOM exists,
+            # and it would break on the first dependency bump -- which is how
+            # policies get switched off.
+            #
+            # It also avoids asserting the internal shape of cosign's SBOM
+            # predicate, which differs between `--type spdx` and
+            # `--type spdxjson`. The build workflow prints the real predicate
+            # keys in its self-verification step if you need to tighten this.
             data: |
               predicateType: "https://spdx.dev/Document"
-              predicate: {
-                spdxVersion: string
-                SPDXID: string
-              }

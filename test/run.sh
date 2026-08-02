@@ -15,17 +15,25 @@ ROWS=()
 # name | image ref | expected decision | expected policy in the message | what it proves
 #
 # The fourth field is what stops this suite from passing for the wrong reason.
-# It is not enough that the pod was rejected, nor even that policy.sigstore.dev
-# rejected it -- the named policy has to be the one that failed. Without this,
-# any structural error (a malformed reference, an unreachable registry) reads
-# as a successful security control.
+# Where it is set, that named policy must be the one that failed.
+#
+# It is only set for the two cases that can isolate a single policy. Every
+# policy here is anchored to the same workflow identity, so an image that is
+# unsigned, signed by the wrong identity, or signed outside the transparency
+# log fails all three at once -- and policy-controller reports only the first
+# failure it hits. Demanding a specific policy name for those cases would be
+# asserting an implementation detail of the webhook's evaluation order.
+#
+# Those cases still assert that a real policy verdict was reached (the message
+# must contain "failed policy:"), which is what distinguishes an evaluated
+# rejection from a structural one.
 CASES=(
   "trusted|${TRUSTED_REF:-${IMAGE}:trusted}|admit||Signed by the release workflow, with SLSA provenance and an SBOM"
-  "unsigned|${UNSIGNED_REF:-${IMAGE}:unsigned}|reject|require-trusted-signature|No signature at all"
-  "no-provenance|${NOPROV_REF:-${IMAGE}:no-provenance}|reject|require-slsa-provenance|Correctly signed, but no provenance attestation"
+  "unsigned|${UNSIGNED_REF:-${IMAGE}:unsigned}|reject||No signature at all"
+  "no-provenance|${NOPROV_REF:-${IMAGE}:no-provenance}|reject|require-slsa-provenance|Signed, with an SBOM, but no provenance attestation"
   "no-sbom|${NOSBOM_REF:-${IMAGE}:no-sbom}|reject|require-sbom|Signed with valid provenance, but no SBOM attestation"
-  "rogue|${ROGUE_REF:-${IMAGE}:rogue}|reject|require-trusted-signature|Validly signed and attested by the WRONG workflow identity"
-  "keysigned|${KEYSIGNED_REF:-${IMAGE}:keysigned}|reject|require-trusted-signature|Real signature, never written to the Rekor transparency log"
+  "rogue|${ROGUE_REF:-${IMAGE}:rogue}|reject||Validly signed and attested by the WRONG workflow identity"
+  "keysigned|${KEYSIGNED_REF:-${IMAGE}:keysigned}|reject||Real signature, never written to the Rekor transparency log"
 )
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -124,6 +132,12 @@ for entry in "${CASES[@]}"; do
     # how a suite like this ends up green while testing nothing.
     bad "${name}: rejected on the reference, not on its signatures -- proves nothing"
     FAIL=$((FAIL + 1)); result="FAIL (not evaluated)"
+
+  elif [ "$actual" = "reject" ] && ! printf '%s' "$message" | grep -q 'failed policy:'; then
+    # A rejection that is not a policy verdict. Covers every remaining way the
+    # webhook can say no without having checked a signature.
+    bad "${name}: rejected without reaching a policy verdict -- proves nothing"
+    FAIL=$((FAIL + 1)); result="FAIL (no verdict)"
 
   elif [ "$actual" = "reject" ] && [ -n "$expect_policy" ] \
        && ! printf '%s' "$message" | grep -q "$expect_policy"; then

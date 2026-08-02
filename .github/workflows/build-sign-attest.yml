@@ -175,17 +175,44 @@ jobs:
       # The SBOM is generated from the image that was actually pushed, by
       # digest -- not from the build context, and not from a tag that could
       # have moved between build and scan.
-      - name: Generate and attest SPDX SBOM (trusted only)
+      # Attested to `trusted` and to `no-provenance`. Giving no-provenance an
+      # SBOM is deliberate: it makes that variant fail exactly one policy
+      # (require-slsa-provenance) instead of two, so the test suite can assert
+      # WHICH policy rejected it rather than merely that something did.
+      - name: Generate and attest SPDX SBOM
         run: |
           set -euo pipefail
-          syft "${IMAGE}@${{ steps.build.outputs.trusted }}" \
-            -o spdx-json > sbom.spdx.json
-          echo "SBOM packages: $(grep -o '"SPDXID"' sbom.spdx.json | wc -l)"
+          for digest in \
+            "${{ steps.build.outputs.trusted }}" \
+            "${{ steps.build.outputs['no-provenance'] }}"; do
+            syft "${IMAGE}@${digest}" -o spdx-json > sbom.spdx.json
+            cosign attest --yes \
+              --type spdxjson \
+              --predicate sbom.spdx.json \
+              "${IMAGE}@${digest}"
+          done
 
-          cosign attest --yes \
-            --type spdxjson \
-            --predicate sbom.spdx.json \
-            "${IMAGE}@${{ steps.build.outputs.trusted }}"
+      # A build that verifies its own output. Catches a mismatch between what
+      # cosign produces and what the cluster policies expect here, in the job
+      # that created it, rather than in an admission failure an hour later.
+      - name: Verify own signature and attestations
+        run: |
+          set -euo pipefail
+          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build-sign-attest.yml@${GITHUB_REF}"
+          REF="${IMAGE}@${{ steps.build.outputs.trusted }}"
+
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "$IDENTITY" "$REF" >/dev/null
+          echo "signature: ok"
+
+          for t in slsaprovenance spdxjson; do
+            cosign verify-attestation --type "$t" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "$IDENTITY" "$REF" 2>/dev/null \
+              | jq -r '.payload' | base64 -d \
+              | jq -c '{predicateType, predicateKeys: (.predicate | keys)}' | head -1
+          done
 
       # A signature that is valid but was never written to the transparency
       # log. Demonstrates why the ctlog requirement in the policy matters:
