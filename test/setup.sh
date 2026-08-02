@@ -43,8 +43,27 @@ kubectl patch configmap/config-policy-controller \
   --namespace cosign-system --type merge \
   --patch '{"data":{"no-match-policy":"deny"}}'
 
+# `helm --wait` returns when the pods are Ready, which is not the same as the
+# validating webhook for ClusterImagePolicy being reachable. Applying too early
+# fails with a bare `Error from server (InternalError)` that names the file and
+# explains nothing.
+log "waiting for the policy-controller webhook to serve"
+kubectl -n cosign-system wait --for=condition=Available deployment --all --timeout=180s || true
+kubectl -n cosign-system wait --for=condition=Ready pod --all --timeout=180s || true
+
 log "applying policies"
-kubectl apply -f "${REPO_ROOT}/policy/"
+for attempt in 1 2 3 4 5 6; do
+  if kubectl apply -f "${REPO_ROOT}/policy/"; then
+    break
+  fi
+  if [ "$attempt" -eq 6 ]; then
+    echo "policies still failing to apply after ${attempt} attempts" >&2
+    kubectl -n cosign-system get pods
+    exit 1
+  fi
+  log "webhook not ready yet, retrying (${attempt}/6)"
+  sleep 10
+done
 
 log "waiting for policies to be reconciled"
 for cip in require-trusted-signature require-slsa-provenance require-sbom; do
