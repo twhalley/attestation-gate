@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The point of the repository: prove the gate rejects what it should.
+# The point of the repository: prove the gate rejects what it should, and
+# rejects it for the reason claimed.
 #
 # Every case attempts a real Pod creation against a real admission webhook.
-# The assertion is on the admission decision, which is the thing under test.
 # Run test/setup.sh first.
 set -uo pipefail
 
@@ -12,14 +12,20 @@ PASS=0
 FAIL=0
 ROWS=()
 
-# case name | image ref | expected decision | what it proves
+# name | image ref | expected decision | expected policy in the message | what it proves
+#
+# The fourth field is what stops this suite from passing for the wrong reason.
+# It is not enough that the pod was rejected, nor even that policy.sigstore.dev
+# rejected it -- the named policy has to be the one that failed. Without this,
+# any structural error (a malformed reference, an unreachable registry) reads
+# as a successful security control.
 CASES=(
-  "trusted|${TRUSTED_REF:-${IMAGE}:trusted}|admit|Signed by the release workflow, with SLSA provenance and an SBOM"
-  "unsigned|${UNSIGNED_REF:-${IMAGE}:unsigned}|reject|No signature at all"
-  "no-provenance|${NOPROV_REF:-${IMAGE}:no-provenance}|reject|Correctly signed, but no provenance attestation"
-  "no-sbom|${NOSBOM_REF:-${IMAGE}:no-sbom}|reject|Signed with valid provenance, but no SBOM attestation"
-  "rogue|${ROGUE_REF:-${IMAGE}:rogue}|reject|Validly signed and attested by the WRONG workflow identity"
-  "keysigned|${KEYSIGNED_REF:-${IMAGE}:keysigned}|reject|Real signature, never written to the Rekor transparency log"
+  "trusted|${TRUSTED_REF:-${IMAGE}:trusted}|admit||Signed by the release workflow, with SLSA provenance and an SBOM"
+  "unsigned|${UNSIGNED_REF:-${IMAGE}:unsigned}|reject|require-trusted-signature|No signature at all"
+  "no-provenance|${NOPROV_REF:-${IMAGE}:no-provenance}|reject|require-slsa-provenance|Correctly signed, but no provenance attestation"
+  "no-sbom|${NOSBOM_REF:-${IMAGE}:no-sbom}|reject|require-sbom|Signed with valid provenance, but no SBOM attestation"
+  "rogue|${ROGUE_REF:-${IMAGE}:rogue}|reject|require-trusted-signature|Validly signed and attested by the WRONG workflow identity"
+  "keysigned|${KEYSIGNED_REF:-${IMAGE}:keysigned}|reject|require-trusted-signature|Real signature, never written to the Rekor transparency log"
 )
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -31,14 +37,33 @@ command -v kubectl >/dev/null 2>&1 || { echo "missing required tool: kubectl" >&
 kubectl get namespace "$NS" >/dev/null 2>&1 || {
   echo "namespace '$NS' not found -- run test/setup.sh first" >&2; exit 1; }
 
-log "cleaning up any pods from a previous run"
-kubectl -n "$NS" delete pod --all --ignore-not-found --wait=true >/dev/null 2>&1 || true
+# policy-controller refuses to evaluate an image referenced by tag: signatures
+# bind to digests, and a tag can point somewhere else by the time the kubelet
+# pulls it. Resolving here rather than deploying by tag is also just correct
+# practice -- see GOTCHAS.md.
+resolve() { # ref -> ref@sha256:...
+  local ref="$1"
+  case "$ref" in *@sha256:*) printf '%s' "$ref"; return ;; esac
+
+  local digest=""
+  if command -v crane >/dev/null 2>&1; then
+    digest=$(crane digest "$ref" 2>/dev/null || true)
+  elif command -v skopeo >/dev/null 2>&1; then
+    digest=$(skopeo inspect --format '{{.Digest}}' "docker://${ref}" 2>/dev/null || true)
+  fi
+
+  if [ -z "$digest" ]; then
+    echo "could not resolve ${ref} to a digest." >&2
+    echo "Install crane or skopeo, or pass digests via TRUSTED_REF/UNSIGNED_REF/..." >&2
+    exit 1
+  fi
+  printf '%s@%s' "${ref%%:*}" "$digest"
+}
 
 # Every test pod is made Pod Security Admission `restricted`-compliant on
 # purpose. The namespace enforces both PSA and the sigstore gate, and if these
-# pods failed PSA then all four negative cases would be "rejected" without the
-# signature policy ever being consulted -- a suite that passes for entirely the
-# wrong reason. Holding posture constant leaves provenance as the only variable.
+# pods failed PSA then all the negative cases would be "rejected" without the
+# signature policy ever being consulted.
 overrides() { # pod-name image-ref
   cat <<EOF
 {
@@ -62,8 +87,13 @@ overrides() { # pod-name image-ref
 EOF
 }
 
+log "cleaning up any pods from a previous run"
+kubectl -n "$NS" delete pod --all --ignore-not-found --wait=true >/dev/null 2>&1 || true
+
 for entry in "${CASES[@]}"; do
-  IFS='|' read -r name ref expected why <<<"$entry"
+  IFS='|' read -r name ref expected expect_policy why <<<"$entry"
+
+  ref="$(resolve "$ref")" || exit 1
 
   log "case: ${name} (expect ${expected})"
   output=$(kubectl -n "$NS" run "gate-${name}" \
@@ -74,30 +104,35 @@ for entry in "${CASES[@]}"; do
              2>&1)
   rc=$?
 
-  if [ $rc -eq 0 ]; then
-    actual="admit"
-  else
-    actual="reject"
-  fi
+  if [ $rc -eq 0 ]; then actual="admit"; else actual="reject"; fi
 
-  # Collapse the webhook's message onto one line for the report.
-  message=$(printf '%s' "$output" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-200)
+  message=$(printf '%s' "$output" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-240)
 
   if [ "$actual" != "$expected" ]; then
     bad "${name}: expected ${expected}, got ${actual}"
-    FAIL=$((FAIL + 1))
-    result="FAIL"
+    FAIL=$((FAIL + 1)); result="FAIL"
+
   elif [ "$actual" = "reject" ] && ! printf '%s' "$message" | grep -q 'policy.sigstore.dev'; then
     # Right outcome, wrong controller. Pod Security Admission also guards this
-    # namespace, so a rejection that did not come from the signature webhook
-    # tells us nothing about whether the signature webhook works.
-    bad "${name}: rejected, but not by policy.sigstore.dev -- this case proves nothing"
-    FAIL=$((FAIL + 1))
-    result="FAIL (wrong controller)"
+    # namespace; a rejection from it says nothing about the signature gate.
+    bad "${name}: rejected, but not by policy.sigstore.dev -- proves nothing"
+    FAIL=$((FAIL + 1)); result="FAIL (wrong controller)"
+
+  elif [ "$actual" = "reject" ] && printf '%s' "$message" | grep -q 'must be an image digest'; then
+    # Right controller, but it refused to evaluate the reference at all. This
+    # is a structural error dressed as a security verdict, and it is exactly
+    # how a suite like this ends up green while testing nothing.
+    bad "${name}: rejected on the reference, not on its signatures -- proves nothing"
+    FAIL=$((FAIL + 1)); result="FAIL (not evaluated)"
+
+  elif [ "$actual" = "reject" ] && [ -n "$expect_policy" ] \
+       && ! printf '%s' "$message" | grep -q "$expect_policy"; then
+    bad "${name}: rejected, but not by ${expect_policy}"
+    FAIL=$((FAIL + 1)); result="FAIL (wrong policy)"
+
   else
-    ok "${name}: ${actual}"
-    PASS=$((PASS + 1))
-    result="PASS"
+    ok "${name}: ${actual}${expect_policy:+ (${expect_policy})}"
+    PASS=$((PASS + 1)); result="PASS"
   fi
 
   [ "$actual" = "reject" ] && printf '     %s\n' "$message"
@@ -109,15 +144,14 @@ done
 # cannot start is not proving much.
 if [ "$FAIL" -eq 0 ]; then
   log "waiting for the admitted pod to reach Running"
-  if kubectl -n "$NS" wait --for=condition=Ready pod/gate-trusted --timeout=120s >/dev/null 2>&1; then
+  if kubectl -n "$NS" wait --for=condition=Ready pod/gate-trusted --timeout=180s >/dev/null 2>&1; then
     ok "gate-trusted is Running"
   else
     bad "gate-trusted was admitted but never became Ready"
     kubectl -n "$NS" describe pod gate-trusted | tail -25
     echo
-    echo "Most likely cause: the GHCR package is private, so the kubelet cannot" >&2
-    echo "pull it. Make ghcr.io/twhalley/attestation-gate/app public, or add an" >&2
-    echo "imagePullSecret to the ${NS} namespace. See README.md, 'One-time setup'." >&2
+    echo "Most likely cause: the cluster cannot pull the image. Make the GHCR" >&2
+    echo "package public, or add an imagePullSecret to the ${NS} namespace." >&2
     FAIL=$((FAIL + 1))
   fi
 fi

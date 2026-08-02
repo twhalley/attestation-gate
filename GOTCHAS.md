@@ -302,6 +302,36 @@ the package public or create an `imagePullSecret` in the `gated` namespace.
 The admission tests still pass without this — admission happens before the pull —
 but the "and it actually runs" check does not.
 
+### policy-controller refuses to evaluate an image referenced by tag
+
+Deploy `ghcr.io/…/app:trusted` into an enforced namespace and you get:
+
+```
+admission webhook "policy.sigstore.dev" denied the request:
+validation failed: invalid value: ghcr.io/…/app:trusted must be an image digest
+```
+
+Correct behaviour — signatures bind to digests, and a tag can point somewhere
+else by the time the kubelet pulls it — but note what it does to a test suite.
+**Every case was rejected, including the ones that were supposed to be, and for
+a reason that has nothing to do with signatures.** Five of six cases reported
+PASS while proving absolutely nothing.
+
+It even survives the "was it the right controller?" check, because the
+rejection genuinely does come from `policy.sigstore.dev`. What catches it is
+asserting on the *named policy* in the message:
+
+```bash
+elif [ "$actual" = reject ] && ! grep -q "$expect_policy" <<<"$message"; then
+  bad "rejected, but not by ${expect_policy}"
+```
+
+Second time this exact class of bug appeared in this repository, in a different
+disguise. The lesson generalises: **a negative test that does not assert on the
+reason is not a test.** `test/run.sh` resolves tags to digests with `crane`
+before deploying, which is also what you should be doing in production
+manifests.
+
 ### Two admission controllers means your negative tests can pass for the wrong reason
 
 The `gated` namespace enforces Pod Security Admission (`restricted`) *and* the

@@ -24,6 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Used by test/run.sh to resolve tags to digests before deploying.
+      - name: Install crane
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz \
+            | sudo tar xz -C /usr/local/bin crane
+          crane version
+
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
@@ -43,6 +51,11 @@ jobs:
       - name: Give the cluster credentials to pull from GHCR
         run: |
           set -euo pipefail
+          # crane needs its own credentials to resolve tags to digests.
+          crane auth login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}"
+
           kubectl -n gated create secret docker-registry ghcr \
             --docker-server=ghcr.io \
             --docker-username="${{ github.actor }}" \

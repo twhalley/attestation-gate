@@ -38,6 +38,10 @@ tar xzf /tmp/apko.tgz -C /tmp
 find /tmp -maxdepth 2 -name apko -type f -exec mv {} "${BIN}/apko" \;
 chmod +x "${BIN}/apko"
 
+log "installing crane"
+curl -fsSL --retry 3 https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz \
+  | tar xz -C "$BIN" crane
+
 log "installing jq"
 curl -fsSL --retry 3 -o "${BIN}/jq" \
   https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64
