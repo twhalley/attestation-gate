@@ -17,7 +17,7 @@
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "The vulnerable code is in the Perl interpreter, which is present in the base image but is never invoked. The image entrypoint is a single statically linked Go binary; it does not exec any interpreter, and no shell or init script runs before it. The package is reachable only by an attacker who already has arbitrary code execution in the container, at which point this CVE is not the relevant problem."
+      "impact_statement": "The vulnerable code is in the Perl interpreter, which Debian pulls into the python:3.12 base image but which this service never invokes. The entrypoint is gunicorn running a Flask application; it does not shell out, does not exec any other interpreter, and no init script runs before it. Perl is reachable only by an attacker who already has arbitrary code execution in the container, at which point this CVE is not the relevant problem. Note the asymmetry this documents: the vulnerability exists because of what the base image dragged in, not because of anything the application chose."
     }
   ]
 }

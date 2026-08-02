@@ -34,13 +34,21 @@ Related to the above: once you add `attestations` to an authority, that
 authority is about attestations. If you want both a bare signature and an
 attestation enforced, that is two policies.
 
-### `docker/build-push-action` adds its own attestations by default
+### BuildKit adds its own attestations by default
 
-BuildKit's provenance/SBOM attestations turn the pushed artefact into an image
-index with an extra attestation manifest. Cosign and policy-controller cope, but
-the manifest you inspect stops looking like the manifest you expected, and
-`cosign verify` output becomes confusing. Set `provenance: false` and
-`sbom: false` when you want to reason about exactly one attestation.
+If you build with `docker/build-push-action`, BuildKit's provenance/SBOM
+attestations turn the pushed artefact into an image index with an extra
+attestation manifest. Cosign and policy-controller cope, but the manifest you
+inspect stops looking like the manifest you expected and `cosign verify` output
+becomes confusing. Set `provenance: false` and `sbom: false` when you want to
+reason about exactly one attestation.
+
+This repository sidesteps it by building with `podman build` and pushing with
+`podman push --digestfile`, which produces a plain manifest and hands back the
+digest directly. The security argument for Podman here is separate and simpler:
+rootless and daemonless, so no build step holds a socket equivalent to host
+root. For a pipeline whose only output is a trust claim, the build tool having
+less authority is worth the swap on its own.
 
 ### `cosign sign` needs `id-token: write`
 
@@ -95,7 +103,7 @@ perfectly in a namespace nobody is enforcing.
 Use an ephemeral debug container that brings its own userland:
 
 ```
-kubectl debug -it pod/gate-trusted --image=cgr.dev/chainguard/busybox --target=gatedemo
+kubectl debug -it pod/gate-trusted --image=cgr.dev/chainguard/busybox --target=gate-trusted
 ```
 
 `--target` is what puts you in the same process namespace as the running
@@ -104,17 +112,58 @@ its processes.
 
 ### The `-dev` tag is a build stage, not a debug convenience
 
-`cgr.dev/chainguard/go:latest` has a toolchain and a shell; `:latest-dev`
-variants exist for images that otherwise have neither. They are for the builder
-stage of a multi-stage build. Shipping a `-dev` tag to production silently
-undoes the reason you picked the base image.
+`cgr.dev/chainguard/python:latest-dev` carries pip, a shell and a package
+manager; `cgr.dev/chainguard/python:latest` carries none of them. The `-dev`
+tag exists for the builder stage of a multi-stage build. Shipping it to
+production silently undoes the reason you picked the base image — and it is an
+easy accident, because `-dev` is also the tag that makes your debugging work.
 
-### `CGO_ENABLED=0` is not optional on `static`
+### The `-dev` image is non-root, so it cannot write to `/`
 
-`cgr.dev/chainguard/static` has no dynamic loader. A cgo-linked binary fails at
-startup with `no such file or directory` — which is about the *interpreter*, not
-the binary, and reads like the file is missing when it is right there. If you
-need cgo, use `cgr.dev/chainguard/glibc-dynamic` instead.
+The obvious first attempt fails immediately:
+
+```
+RUN python -m venv /venv
+→ Error: [Errno 13] Permission denied: '/venv'
+```
+
+`cgr.dev/chainguard/python:latest-dev` has pip and a shell, but it still runs
+as `nonroot`. Either add `USER root` to the build stage, or — better — build
+the venv somewhere the build user already owns, like `/home/nonroot/venv`.
+Reaching for `USER root` works and costs nothing at runtime, since the build
+stage is discarded, but it is worth not developing the reflex.
+
+### The venv path must be identical in both stages
+
+This is the Python distroless trap, and it is genuinely nasty. A virtualenv
+hardcodes its own absolute path into the shebang of every console script:
+
+```
+$ head -1 /venv/bin/gunicorn
+#!/venv/bin/python
+```
+
+Install at `/venv` and `COPY --from=build /venv /opt/venv`, and that shebang
+now points at an interpreter that does not exist. The failure is:
+
+```
+exec /opt/venv/bin/gunicorn: no such file or directory
+```
+
+…naming a file that is plainly there. The missing file is the *interpreter in
+the shebang*, not the script. Same class of error as the old cgo-on-scratch
+problem, and equally confusing the first time.
+
+Keep the venv at one path across both stages, or use `--copies` and rewrite the
+shebangs. This repository uses `/home/nonroot/venv` in both.
+
+### Native wheels need the compiler in the builder, not the runtime
+
+Anything without a pure-Python wheel (`cryptography`, `psycopg2`, `numpy`)
+compiles at install time. That needs a toolchain and headers — which is what
+the `-dev` image is for. If the build stage has them and the runtime stage does
+not, you are doing it right. If you find yourself adding `gcc` to the *runtime*
+image, the multi-stage split has broken down somewhere.
 
 ### Non-root cannot bind ports below 1024
 
@@ -131,29 +180,45 @@ image fails only when it first calls an external API.
 
 ### No timezone database
 
-`time.LoadLocation("Europe/London")` fails on a minimal base. Either use UTC
-throughout — which you probably should — or, in Go, `import _ "time/tzdata"` to
-embed the database in the binary.
+`zoneinfo.ZoneInfo("Europe/London")` raises `ZoneInfoNotFoundError` on a
+minimal base. Either use UTC throughout — which you probably should — or add
+`tzdata` to `requirements.txt`, which ships the database as a wheel.
 
-### glibc vs musl
+### glibc vs musl decides which wheels you get
 
-Chainguard images are glibc-based, Alpine is musl. A binary built in an Alpine
-builder and copied into a glibc runtime (or the reverse) fails at startup in
-ways that look like corruption. Build and run on the same libc, or link
-statically and stop caring.
+Chainguard images are glibc-based; Alpine is musl. PyPI publishes `manylinux`
+wheels for glibc and `musllinux` wheels for musl, and plenty of packages ship
+only the former. Move a build to Alpine and packages that installed instantly
+start compiling from source — or fail outright for want of a toolchain. Staying
+on glibc is the boring, correct choice for Python.
+
+### `.pyc` files versus a read-only root filesystem
+
+Python writes bytecode caches next to source on first import. With
+`readOnlyRootFilesystem: true` that fails, and depending on the import it either
+warns or crashes. Set `PYTHONDONTWRITEBYTECODE=1`, and pre-compile in the
+builder stage if you care about the startup cost you just gave up.
+
+Related: set `PYTHONUNBUFFERED=1`, or logs sit in a buffer and vanish when the
+container is killed — which is precisely when you wanted them.
 
 ### Nothing writes to the filesystem
 
 No `/tmp` scratch space you should rely on, and a read-only root filesystem is
 the expected posture. Mount an `emptyDir` for anything that genuinely needs to
-write.
+write — including, for some libraries, `~/.cache`.
 
 ### The entrypoint differs from the image you migrated off
 
 Fat base images often have a shell entrypoint that expands environment
 variables and globs. Distroless images `exec` the binary directly, so
-`ENTRYPOINT ["/app", "--flag=$SOME_VAR"]` passes the literal string `$SOME_VAR`.
-Resolve configuration inside the process, not in the entrypoint.
+`ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:$PORT", …]` passes the literal
+string `$PORT`. Resolve configuration inside the process, not in the entrypoint.
+
+Also worth knowing: `cgr.dev/chainguard/python` already sets `ENTRYPOINT
+["python"]`. Override it with an absolute path — there is no shell to search
+`PATH` on your behalf, so `ENTRYPOINT ["gunicorn", …]` fails even though
+`PATH` contains the venv.
 
 ---
 
@@ -210,6 +275,33 @@ packages are private by default even when the repository is public. Either make
 the package public or create an `imagePullSecret` in the `gated` namespace.
 The admission tests still pass without this — admission happens before the pull —
 but the "and it actually runs" check does not.
+
+### Two admission controllers means your negative tests can pass for the wrong reason
+
+The `gated` namespace enforces Pod Security Admission (`restricted`) *and* the
+sigstore policy. PSA runs first. A test pod without a compliant
+`securityContext` is rejected by PSA before the signature webhook is ever
+consulted:
+
+```
+Error from server (Forbidden): pods "psa-bad" is forbidden:
+violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false …
+```
+
+Every negative case still "passes" — the pod was rejected, which is what the
+assertion checked. The signature gate could be entirely broken and the suite
+would stay green.
+
+Two fixes, both applied here: give every test pod a `restricted`-compliant
+`securityContext` so posture is constant and provenance is the only variable,
+and assert on *which* controller rejected it:
+
+```bash
+elif [ "$actual" = "reject" ] && ! grep -q 'policy.sigstore.dev' <<<"$message"; then
+  bad "rejected, but not by policy.sigstore.dev -- this case proves nothing"
+```
+
+Generalised: a negative test is only evidence if you know *why* it failed.
 
 ### Rejections are on Pod creation, not Deployment creation
 

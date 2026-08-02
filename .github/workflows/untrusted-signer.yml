@@ -38,29 +38,34 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
       - uses: sigstore/cosign-installer@v3
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Ensure podman is available
+        run: |
+          set -euo pipefail
+          if ! command -v podman >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq podman
+          fi
+
+      - name: Log in to ghcr.io
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | podman login ghcr.io --username "${{ github.actor }}" --password-stdin
 
       - name: Build rogue variant
         id: rogue
-        uses: docker/build-push-action@v6
-        with:
-          context: app
-          file: app/Dockerfile
-          push: true
-          tags: ${{ env.IMAGE }}:rogue
-          labels: variant=rogue
-          build-args: |
-            VERSION=${{ github.sha }}
-            VARIANT=rogue
-          provenance: false
-          sbom: false
+        run: |
+          set -euo pipefail
+          podman build \
+            --label variant=rogue \
+            --build-arg "VERSION=${GITHUB_SHA}" \
+            --build-arg VARIANT=rogue \
+            -f app/Dockerfile \
+            -t "${IMAGE}:rogue" \
+            "$PWD/app"
+          podman push "${IMAGE}:rogue" --digestfile /tmp/rogue.digest
+          echo "digest=$(cat /tmp/rogue.digest)" >> "$GITHUB_OUTPUT"
 
       - name: Sign and attest as the untrusted workflow identity
         run: |

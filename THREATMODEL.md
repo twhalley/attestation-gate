@@ -52,6 +52,17 @@ come with a claim about how it was built. Test case `no-provenance`.
 **Images nobody wrote a policy for.** `no-match-policy: deny` in `test/setup.sh`.
 Without it, pushing to an unmatched registry path bypasses the gate entirely.
 
+**A container escalating once it is running.** Pod Security Admission
+(`restricted`) is enforced on the same namespace: non-root, no privilege
+escalation, all capabilities dropped, seccomp `RuntimeDefault`, no host
+namespaces or `hostPath`. This is a separate control answering a separate
+question, and it would still apply to an image that somehow satisfied the
+signature policy.
+
+**A build that silently changed underneath a signature.** Dependencies are
+pinned exactly in `requirements.txt`, so the artefact that was scanned and the
+artefact that was signed contain the same package versions.
+
 ---
 
 ## What this does not stop
@@ -73,11 +84,23 @@ generation into an isolated builder the build steps cannot reach — the
 `slsa-github-generator` reusable workflow, or an equivalent hosted builder.
 I chose not to claim L3 rather than claim it loosely.
 
-**A vulnerable dependency.** Nothing here scans, and the gate would happily
-admit a signed image full of critical CVEs. `scan-diff` measures; it does not
-enforce. Wiring a severity threshold into admission is a deliberate omission —
-blocking on CVE count without reachability analysis mostly produces alert
-fatigue and pressure to add exceptions.
+**A vulnerable dependency.** Nothing here scans at admission, and the gate would
+happily admit a signed image full of critical CVEs. `scan-diff` measures; it
+does not enforce. Wiring a severity threshold into admission is a deliberate
+omission — blocking on CVE count without reachability analysis mostly produces
+alert fatigue and pressure to add exceptions.
+
+**A compromised package index.** `requirements.txt` pins versions but not
+hashes. A compromised PyPI mirror, or an account takeover that re-uploads a
+wheel under an existing version, would be installed and then faithfully signed.
+`pip install --require-hashes` pins the artefact rather than the version number
+and closes this; it is not done here, and the gap is more real than most people
+assume, because the pipeline would attest to the result without complaint.
+
+**Dependency confusion.** Nothing here pins an index or verifies package
+provenance, so a package resolved from an unexpected source would be built and
+signed like any other. This is the attack that VEX and SBOMs describe after the
+fact but do not prevent.
 
 **Runtime compromise.** Admission is a one-time check at Pod creation. Nothing
 here observes the workload afterwards.

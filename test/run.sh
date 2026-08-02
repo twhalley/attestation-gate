@@ -33,6 +33,34 @@ kubectl get namespace "$NS" >/dev/null 2>&1 || {
 log "cleaning up any pods from a previous run"
 kubectl -n "$NS" delete pod --all --ignore-not-found --wait=true >/dev/null 2>&1 || true
 
+# Every test pod is made Pod Security Admission `restricted`-compliant on
+# purpose. The namespace enforces both PSA and the sigstore gate, and if these
+# pods failed PSA then all four negative cases would be "rejected" without the
+# signature policy ever being consulted -- a suite that passes for entirely the
+# wrong reason. Holding posture constant leaves provenance as the only variable.
+overrides() { # pod-name image-ref
+  cat <<EOF
+{
+  "spec": {
+    "securityContext": {
+      "runAsNonRoot": true,
+      "runAsUser": 65532,
+      "seccompProfile": { "type": "RuntimeDefault" }
+    },
+    "containers": [{
+      "name": "$1",
+      "image": "$2",
+      "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "readOnlyRootFilesystem": true,
+        "capabilities": { "drop": ["ALL"] }
+      }
+    }]
+  }
+}
+EOF
+}
+
 for entry in "${CASES[@]}"; do
   IFS='|' read -r name ref expected why <<<"$entry"
 
@@ -40,7 +68,9 @@ for entry in "${CASES[@]}"; do
   output=$(kubectl -n "$NS" run "gate-${name}" \
              --image="$ref" \
              --restart=Never \
-             --labels="gate-case=${name}" 2>&1)
+             --labels="gate-case=${name}" \
+             --overrides="$(overrides "gate-${name}" "$ref")" \
+             2>&1)
   rc=$?
 
   if [ $rc -eq 0 ]; then
@@ -52,14 +82,21 @@ for entry in "${CASES[@]}"; do
   # Collapse the webhook's message onto one line for the report.
   message=$(printf '%s' "$output" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-200)
 
-  if [ "$actual" = "$expected" ]; then
-    ok "${name}: ${actual}"
-    PASS=$((PASS + 1))
-    result="PASS"
-  else
+  if [ "$actual" != "$expected" ]; then
     bad "${name}: expected ${expected}, got ${actual}"
     FAIL=$((FAIL + 1))
     result="FAIL"
+  elif [ "$actual" = "reject" ] && ! printf '%s' "$message" | grep -q 'policy.sigstore.dev'; then
+    # Right outcome, wrong controller. Pod Security Admission also guards this
+    # namespace, so a rejection that did not come from the signature webhook
+    # tells us nothing about whether the signature webhook works.
+    bad "${name}: rejected, but not by policy.sigstore.dev -- this case proves nothing"
+    FAIL=$((FAIL + 1))
+    result="FAIL (wrong controller)"
+  else
+    ok "${name}: ${actual}"
+    PASS=$((PASS + 1))
+    result="PASS"
   fi
 
   [ "$actual" = "reject" ] && printf '     %s\n' "$message"

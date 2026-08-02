@@ -1,0 +1,9 @@
+# Pinned exactly. A floating range means the artefact you scanned and the
+# artefact you shipped can differ, which makes both the SBOM and the signature
+# a claim about something you did not actually test.
+#
+# The next control up from this is `--require-hashes`, which pins the artefact
+# rather than the version number and defeats a compromised index serving a
+# re-uploaded wheel. Noted in THREATMODEL.md as a gap rather than pretended at.
+flask==3.1.0
+gunicorn==23.0.0

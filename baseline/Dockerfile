@@ -1,24 +1,27 @@
 # Baseline variant: deliberately bad, and honestly so.
 #
-# This is not a strawman -- it is what a large number of production Go services
-# actually ship: build image used as runtime image, running as root, with a
-# full Debian userland, a shell and a package manager still present.
+# This is not a strawman. It is the shape of a very large number of production
+# Python services: the full python:3.12 Debian image, pip installing as root
+# into the system interpreter, no venv, no multi-stage, and a shell, a package
+# manager and a compiler toolchain all still present in the shipped artefact.
 #
 # It exists to be measured against app/Dockerfile in the scan-diff workflow.
 
-FROM golang:1.23
+FROM python:3.12
 
 ARG VERSION=dev
 ARG VARIANT=baseline
 
-WORKDIR /src
-COPY app/go.mod ./
-COPY app/main.go ./
+WORKDIR /app
 
-RUN CGO_ENABLED=0 go build \
-      -ldflags="-X main.version=${VERSION} -X main.variant=${VARIANT}" \
-      -o /usr/local/bin/gatedemo .
+COPY app/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# No USER directive: this runs as root, like the image it is imitating.
+COPY app/app.py ./
+
+ENV APP_VERSION=${VERSION} \
+    APP_VARIANT=${VARIANT}
+
+# No USER directive: this runs as root, like the images it is imitating.
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/gatedemo"]
+ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "app:app"]
