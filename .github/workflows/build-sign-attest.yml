@@ -52,11 +52,20 @@ jobs:
       - name: Verify base image signatures
         run: ./scripts/verify-base-images.sh
 
+      # Podman and cosign do not share a credential store. `podman login` writes
+      # to $XDG_RUNTIME_DIR/containers/auth.json; cosign uses the go-containerregistry
+      # keychain, which reads ~/.docker/config.json. Log in to the path cosign
+      # reads, then point podman at the same file so both agree.
       - name: Log in to ghcr.io
         run: |
           set -euo pipefail
+          mkdir -p "$HOME/.docker"
           echo "${{ secrets.GITHUB_TOKEN }}" \
-            | podman login ghcr.io --username "${{ github.actor }}" --password-stdin
+            | podman login ghcr.io \
+                --username "${{ github.actor }}" \
+                --password-stdin \
+                --authfile "$HOME/.docker/config.json"
+          echo "REGISTRY_AUTH_FILE=$HOME/.docker/config.json" >> "$GITHUB_ENV"
 
       # Each variant is byte-identical except for the `variant` label, which is
       # exactly enough to give it its own digest and therefore its own

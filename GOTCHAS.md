@@ -50,6 +50,32 @@ rootless and daemonless, so no build step holds a socket equivalent to host
 root. For a pipeline whose only output is a trust claim, the build tool having
 less authority is worth the swap on its own.
 
+### Podman and cosign do not share a credential store
+
+`podman login` succeeds, `podman push` succeeds, and then `cosign sign` fails
+on the image it just pushed:
+
+```
+Error: signing […]: accessing image:
+GET https://ghcr.io/token?scope=…: UNAUTHORIZED: authentication required
+```
+
+Podman writes credentials to `$XDG_RUNTIME_DIR/containers/auth.json`. Cosign
+uses the go-containerregistry keychain, which reads `~/.docker/config.json`.
+Neither is wrong; they simply do not look in the same place, and the error
+blames the registry rather than the credential lookup.
+
+Fix: log in to the path cosign reads, then point podman at the same file.
+
+```bash
+podman login ghcr.io -u "$USER" --password-stdin --authfile "$HOME/.docker/config.json"
+echo "REGISTRY_AUTH_FILE=$HOME/.docker/config.json" >> "$GITHUB_ENV"
+```
+
+This does not arise with Docker because `docker login` already writes there,
+which is why swapping the build engine breaks signing in a way that looks
+nothing like a build-engine problem.
+
 ### `cosign sign` needs `id-token: write`
 
 Keyless signing exchanges the Actions OIDC token for a Fulcio certificate.

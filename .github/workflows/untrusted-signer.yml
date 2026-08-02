@@ -48,11 +48,18 @@ jobs:
             sudo apt-get update -qq && sudo apt-get install -y -qq podman
           fi
 
+      # See build-sign-attest.yml: podman and cosign read different credential
+      # stores, so log in to the one cosign uses and point podman at it too.
       - name: Log in to ghcr.io
         run: |
           set -euo pipefail
+          mkdir -p "$HOME/.docker"
           echo "${{ secrets.GITHUB_TOKEN }}" \
-            | podman login ghcr.io --username "${{ github.actor }}" --password-stdin
+            | podman login ghcr.io \
+                --username "${{ github.actor }}" \
+                --password-stdin \
+                --authfile "$HOME/.docker/config.json"
+          echo "REGISTRY_AUTH_FILE=$HOME/.docker/config.json" >> "$GITHUB_ENV"
 
       - name: Build rogue variant
         id: rogue
